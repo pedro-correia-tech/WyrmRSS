@@ -388,4 +388,47 @@ mod tests {
             .await
             .expect("should delete feed");
     }
+
+    #[tokio::test]
+    async fn clear_rsshub_validators_leaves_other_feeds_alone() {
+        let pool = setup_test_db().await;
+        let https_feed = test_feed!(&pool);
+        let rsshub_feed = Feed::create(
+            &pool,
+            FeedInsertForm {
+                title: "rsshub test feed".to_string(),
+                url: format!(
+                    "rsshub://test/{}",
+                    Utc::now().timestamp_nanos_opt().expect("timestamp in range")
+                ),
+                ttl: 60,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("should create rsshub feed");
+
+        for feed in [&https_feed, &rsshub_feed] {
+            let mut form = FeedUpdateForm::from_poll_result(feed, &Ok(()));
+            form.etag = Some(Some("\"v1\"".into()));
+            Feed::update(&pool, form)
+                .await
+                .expect("should store validators");
+        }
+
+        Feed::clear_rsshub_validators(&pool)
+            .await
+            .expect("clear should succeed");
+
+        let https_feed = Feed::get(&pool, https_feed.id).await.expect("should get");
+        let rsshub_feed = Feed::get(&pool, rsshub_feed.id).await.expect("should get");
+        assert_eq!(https_feed.etag.as_deref(), Some("\"v1\""));
+        assert!(rsshub_feed.etag.is_none());
+
+        for feed in [https_feed, rsshub_feed] {
+            Feed::delete(&pool, feed.id)
+                .await
+                .expect("should delete feed");
+        }
+    }
 }

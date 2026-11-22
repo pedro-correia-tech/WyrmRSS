@@ -1,6 +1,7 @@
 use crate::{
     filter::CompiledFilters,
-    http::{FeedResponse, HttpClient, HttpConfig, HttpValidators},
+    http::{HttpClient, HttpConfig, HttpValidators},
+    icon,
     url::FeedUrlResolver,
 };
 use chrono::Utc;
@@ -123,9 +124,7 @@ impl FeedWorker {
                         webhooks,
                         folder,
                     };
-                    if let Err(e) = process_feed(&pool, &http, &resolver, &task).await {
-                        error!("Failed to process feed {}: {e}", task.feed.url);
-                    }
+                    process_feed(&pool, &http, &resolver, &task).await;
                 })
             })
             .collect();
@@ -180,17 +179,25 @@ async fn process_feed(
     http: &HttpClient,
     resolver: &FeedUrlResolver,
     task: &FeedTask,
-) -> WyrmResult<()> {
+) {
     info!("Processing feed {}", task.feed.title);
 
     let result = fetch_and_store(pool, http, resolver, task).await;
+
+    if let Err(e) = &result {
+        error!("Failed to process feed {}: {e}", task.feed.url);
+    }
+
     let mut form = FeedUpdateForm::from_poll_result(&task.feed, &result);
-    if let Ok(validators) = &result {
+
+    if let Ok(Some(validators)) = &result {
         form.etag = Some(validators.etag.clone());
         form.last_modified = Some(validators.last_modified.clone());
     }
-    Feed::update(pool, form).await?;
-    result.map(|_| ())
+
+    if let Err(e) = Feed::update(pool, form).await {
+        error!("Failed to save poll result for feed {}: {e}", task.feed.url);
+    }
 }
 
 async fn fetch_and_store(
@@ -198,25 +205,30 @@ async fn fetch_and_store(
     http: &HttpClient,
     resolver: &FeedUrlResolver,
     task: &FeedTask,
-) -> WyrmResult<HttpValidators> {
+) -> WyrmResult<Option<HttpValidators>> {
     let fetch_target = resolver.resolve(&task.feed.url)?;
+
     let current = Feed::get(pool, task.feed.id).await?;
-    let validators = if crate::icon::needs_feed_icon(pool, task.feed.id).await {
+
+    let needs_icon = icon::needs_feed_icon(pool, task.feed.id).await;
+
+    let validators = if needs_icon {
         HttpValidators::default() // Fetch the body so the icon can be resolved.
     } else {
         HttpValidators::from(&current)
     };
-    let response = http.fetch_conditional(&fetch_target, &validators).await?;
-    let (bytes, validators) = match response {
-        FeedResponse::NotModified(validators) => return Ok(validators),
-        FeedResponse::Modified { body, validators } => (body, validators),
+
+    let Some(fetched) = http.fetch_conditional(&fetch_target, &validators).await? else {
+        return Ok(None); // 304: the stored validators stay as they are.
     };
 
-    let parsed = feed_rs::parser::parse(&bytes[..])?;
+    let parsed = feed_rs::parser::parse(&fetched.body[..])?;
 
     // Best-effort: resolves the icon for feeds that never got one (OPML
     // imports, pre-icon feeds) and retries week-old misses.
-    crate::icon::ensure_feed_icon(pool, http, resolver, &task.feed, &parsed).await;
+    if needs_icon {
+        icon::ensure_feed_icon(pool, http, resolver, &task.feed, &parsed).await;
+    }
 
     let filters = CompiledFilters::new(&task.feed.filters);
 
@@ -252,7 +264,7 @@ async fn fetch_and_store(
     );
 
     if new_posts.is_empty() {
-        return Ok(validators);
+        return Ok(Some(fetched.validators));
     }
 
     for webhook in &task.webhooks {
@@ -272,5 +284,5 @@ async fn fetch_and_store(
         }
     }
 
-    Ok(validators)
+    Ok(Some(fetched.validators))
 }

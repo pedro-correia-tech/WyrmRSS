@@ -69,11 +69,12 @@ pub async fn update(
     )
     .await?;
 
+    *ctx.runtime_settings.write()? = RuntimeSettings::from(&settings);
+
     if settings.rsshub_instance != previous_instance {
         Feed::clear_rsshub_validators(&ctx.db_pool).await?;
     }
 
-    *ctx.runtime_settings.write()? = RuntimeSettings::from(&settings);
     // Interrupt the worker's sleep so it reconfigures immediately; safe to drop
     // since runtime_settings is already updated and the worker reads it on its
     // next iteration.
