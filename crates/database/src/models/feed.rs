@@ -118,11 +118,11 @@ impl Feed {
         .await
     }
 
-    /// Applies the form's `Some` fields. With `expected_url` set (worker polls), it only
-    /// updates if the feed's URL still matches, otherwise returns `NotFound`.
-    /// E.g. the user changes a feed's URL in the UI while a poll of the old URL is in
-    /// flight: the edit resets the fetch state, and the late poll result is discarded
-    /// instead of saving the old URL's fetch time or error on the new URL.
+    /// Applies the form's `Some` fields. With `expected_url`/`expected_filters` set
+    /// (worker polls), it only updates if the feed's URL and filters still match,
+    /// otherwise returns `NotFound`. E.g. the user edits a feed while a poll is in
+    /// flight: the edit resets the fetch state and validators, and the late poll result
+    /// is discarded instead of writing the old poll's fetch time, error or validators.
     pub async fn update(pool: &DatabasePool, mut form: FeedUpdateForm) -> WyrmResult<Self> {
         let mut conn = pool.get().await?;
         let conn = &mut *conn;
@@ -134,21 +134,22 @@ impl Feed {
                 Some(folder) => Some(Folder::resolve_name_on(conn, folder.as_deref()).await?),
             };
 
-            let target = feeds::table.find(form.id);
-            let feed = match form.expected_url.take() {
-                Some(url) => {
-                    diesel::update(target.filter(feeds::url.eq(url)))
-                        .set((form, folder_id.map(|f| feeds::folder_id.eq(f))))
-                        .get_result::<Self>(conn)
-                        .await?
-                }
-                None => {
-                    diesel::update(target)
-                        .set((form, folder_id.map(|f| feeds::folder_id.eq(f))))
-                        .get_result::<Self>(conn)
-                        .await?
-                }
-            };
+            let expected_url = form.expected_url.take();
+            let expected_filters = form.expected_filters.take();
+
+            let mut query = diesel::update(feeds::table.find(form.id))
+                .set((form, folder_id.map(|f| feeds::folder_id.eq(f))))
+                .into_boxed();
+
+            if let Some(url) = expected_url {
+                query = query.filter(feeds::url.eq(url));
+            }
+
+            if let Some(filters) = expected_filters {
+                query = query.filter(feeds::filters.eq(filters));
+            }
+
+            let feed = query.get_result::<Self>(conn).await?;
 
             Ok::<Feed, WyrmError>(feed)
         })
@@ -238,6 +239,10 @@ pub struct FeedUpdateForm {
     /// of a URL that has since been changed is discarded.
     #[diesel(skip_update)]
     pub expected_url: Option<String>,
+    /// Only apply when the feed's fitlers still match; set by the worker so a poll
+    /// of a feed whose filters have since been changed is discarded.
+    #[diesel(skip_update)]
+    pub expected_filters: Option<Filters>,
 }
 
 impl FeedUpdateForm {
@@ -246,7 +251,6 @@ impl FeedUpdateForm {
     pub fn from_poll_result<T>(feed: &Feed, result: &WyrmResult<T>) -> Self {
         Self {
             id: feed.id,
-            expected_url: Some(feed.url.clone()),
             title: None,
             url: None,
             ttl: None,
@@ -258,6 +262,8 @@ impl FeedUpdateForm {
             last_error: Some(result.as_ref().err().map(WyrmError::fetch_error_message)),
             etag: None,
             last_modified: None,
+            expected_url: Some(feed.url.clone()),
+            expected_filters: Some(feed.filters.clone()),
         }
     }
 }
@@ -337,6 +343,7 @@ mod tests {
                 ttl: Some(120),
                 folder: Some(Some(folder.name.clone())),
                 filters: None,
+                expected_filters: None,
                 is_paused: Some(true),
                 last_fetched_at: None,
                 last_error: None,
@@ -399,7 +406,9 @@ mod tests {
                 title: "rsshub test feed".to_string(),
                 url: format!(
                     "rsshub://test/{}",
-                    Utc::now().timestamp_nanos_opt().expect("timestamp in range")
+                    Utc::now()
+                        .timestamp_nanos_opt()
+                        .expect("timestamp in range")
                 ),
                 ttl: 60,
                 ..Default::default()

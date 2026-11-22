@@ -88,6 +88,7 @@ pub async fn update(
     let url_resolver = ctx.url_resolver()?;
 
     let id = path.into_inner();
+
     // Only a *changed* URL triggers discovery. The edit form always sends the
     // url field, so an unchanged one must pass through without a network
     // round-trip, otherwise a TTL/title edit would fail while the feed's
@@ -107,11 +108,14 @@ pub async fn update(
         }
         None => (None, FetchedUrl::None),
     };
+
     let url_changed = url.as_deref().is_some_and(|u| u != feed.url);
+
     let filters = data.filters.map(Filters::from);
     let filters_changed = filters
         .as_ref()
         .is_some_and(|filters| *filters != feed.filters);
+
     let invalidate = url_changed || filters_changed;
 
     let feed = Feed::update(
@@ -130,6 +134,7 @@ pub async fn update(
             etag: invalidate.then_some(None),
             last_modified: invalidate.then_some(None),
             expected_url: None,
+            expected_filters: None,
         },
     )
     .await?;

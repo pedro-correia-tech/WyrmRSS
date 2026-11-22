@@ -19,8 +19,11 @@ use database::{
 use futures::future::join_all;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{Semaphore, mpsc::Receiver};
-use tracing::{error, info, warn};
-use wyrm_utils::result::WyrmResult;
+use tracing::{debug, error, info, warn};
+use wyrm_utils::{
+    error::{DatabaseError, WyrmError},
+    result::WyrmResult,
+};
 
 #[derive(Debug)]
 pub enum WorkerCommand {
@@ -195,8 +198,15 @@ async fn process_feed(
         form.last_modified = Some(validators.last_modified.clone());
     }
 
-    if let Err(e) = Feed::update(pool, form).await {
-        error!("Failed to save poll result for feed {}: {e}", task.feed.url);
+    let url = &task.feed.url;
+
+    match Feed::update(pool, form).await {
+        Ok(_) => {}
+        // Feed edited or deleted mid-poll.
+        Err(WyrmError::Database(DatabaseError::NotFound)) => {
+            debug!("Discarded stale poll for {url}");
+        }
+        Err(e) => error!("Failed to save poll for {url}: {e}"),
     }
 }
 

@@ -444,6 +444,7 @@ async fn feed_health_preserves_success_and_ignores_stale_results() {
             etag: Some(None),
             last_modified: Some(None),
             expected_url: None,
+            expected_filters: None,
             display_mode: None,
         },
     )
